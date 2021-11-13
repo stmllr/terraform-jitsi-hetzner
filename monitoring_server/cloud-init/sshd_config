@@ -1,0 +1,7 @@
+# Managed by cloud-init - please do not touch!
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+UsePAM yes
+PrintMotd no
+X11Forwarding no
+ClientAliveInterval 120

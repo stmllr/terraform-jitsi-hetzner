@@ -1,0 +1,183 @@
+#cloud-config
+apt:
+  security:
+    - arches: [amd64]
+      uri: http://security.debian.org/debian-security
+  sources_list: |
+    deb $SECURITY $RELEASE/updates main contrib
+  sources:
+    influx:
+      source: "deb https://repos.influxdata.com/debian $RELEASE stable"
+      keyid: 684A14CF2582E0C5
+    jitsi:
+      source: "deb https://download.jitsi.org stable/"
+      keyid: B4D2D216F1FD7806
+  debconf_selections:
+    set1: |
+      unattended-upgrades unattended-upgrades/enable_auto_updates boolean true
+      jitsi-videobridge jitsi-videobridge/jvb-hostname string ${fqdn}
+      jitsi-videobridge jitsi-videobridge/cert-choice select "Self-signed certificate will be generated"
+package_update: true
+package_upgrade: true
+packages:
+ - unattended-upgrades
+ - vim
+ - htop
+ - screen
+ - certbot
+ - jitsi-meet
+ - telegraf
+
+fqdn: ${fqdn}
+
+ssh_keys:
+  rsa_private: |
+${ssh_host_rsa_key}
+  rsa_public: ${ssh_host_rsa_key_pub}
+  dsa_private: |
+${ssh_host_dsa_key}
+  dsa_public: ${ssh_host_dsa_key_pub}
+  ecdsa_private: |
+${ssh_host_ecdsa_key}
+  ecdsa_public: ${ssh_host_ecdsa_key_pub}
+  ed25519_private: |
+${ssh_host_ed25519_key}
+  ed25519_public: ${ssh_host_ed25519_key_pub}
+
+ssh_pwauth: false
+disable_root: true
+
+users:
+  - uid: "1000"
+    name: admin
+    groups: [sudo, jitsi, telegraf, systemd-journal]
+    ssh-authorized-keys:
+      - ${ssh_public_key}
+    shell: /bin/bash
+
+chpasswd:
+  list: |
+    admin:default
+
+runcmd:
+    - [ systemctl, restart, networking.service ]
+    - [ systemctl, restart, sshd.service ]
+    - 'echo ${letsencrypt_mail} | /usr/share/jitsi-meet/scripts/install-letsencrypt-cert.sh'
+
+    - [ sed, -i.bak, -e, "s#^.level=INFO#.level=WARNING#g", /etc/jitsi/videobridge/logging.properties ]
+    - [ sed, -i.bak, -e, 's#JVB_OPTS="--apis=,"#JVB_OPTS="--apis=rest,"#' , /etc/jitsi/videobridge/config ]
+    - 'cat /var/tmp/jitsi-meet-config.txt >> /etc/jitsi/meet/${fqdn}-config.js'
+    - 'cat /var/tmp/jitsi-interface-config.txt >> /usr/share/jitsi-meet/interface_config.js'
+
+    - [ systemctl, restart, prosody.service ]
+    - [ systemctl, restart, jicofo.service ]
+    - [ systemctl, restart, jitsi-videobridge2.service ]
+    - [ systemctl, restart, nginx.service ]
+    - 'telegraf --input-filter cpu:disk:diskio:kernel:mem:processes:swap:system --output-filter :  config > /etc/telegraf/telegraf.conf'
+    - [ systemctl, restart, telegraf.service ]
+
+write_files:
+  - path: /etc/network/interfaces.d/60-my-floating-ip.cfg
+    content: |
+      # Managed by cloud-init.yml - please do not touch!
+      auto eth0:1
+        iface eth0:1 inet static
+        address ${public_ip_address}
+        netmask 32
+
+    owner: root:root
+    permissions: '644'
+
+  - path: /etc/ssh/sshd_config
+    content: |
+      # Managed by cloud-init.yml - please do not touch!
+      PasswordAuthentication no
+      ChallengeResponseAuthentication no
+      UsePAM yes
+      PrintMotd no
+      X11Forwarding no
+      ClientAliveInterval 120
+
+    owner: root:root
+    permissions: '640'
+
+  - path: /etc/nginx/conf.d/00-log.conf
+    content: |
+      log_format without_ip '$remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent"';
+      access_log /var/log/nginx/access.log without_ip;
+      error_log /var/log/nginx/error.log;
+
+    owner: root:root
+    permissions: '644'
+
+  - path: /var/tmp/jitsi-interface-config.txt
+    content: |
+      // override configuration
+      var interfaceConfig_override = {
+        DISABLE_JOIN_LEAVE_NOTIFICATIONS: true,
+        DISABLE_VIDEO_BACKGROUND: true,
+        DISABLE_FOCUS_INDICATOR: true
+      };
+      interfaceConfig = Object.assign({}, interfaceConfig, interfaceConfig_override);
+
+    owner: root:root
+    permissions: '644'
+
+  - path: /var/tmp/jitsi-meet-config.txt
+    content: |
+      // override configuration
+      var config_override = {
+        disableAudioLevels: true,
+        startVideoMuted: 7,
+        disableInviteFunctions: true,
+        enableNoisyMicDetection: false,
+        fileRecordingsEnabled: false,
+        transcribingEnabled: false,
+        requireDisplayName: true,
+        defaultLanguage: 'de',
+        disableThirdPartyRequests: true,
+        resolution: 720,
+        constraints: {
+          video: {
+            height: {
+              ideal: 720,
+              max: 720,
+              min: 240
+            }
+          }
+        },
+        desktopSharingFrameRate: {
+          min: 5,
+          max: 10
+        }
+      };
+      config = Object.assign({}, config, config_override);
+
+    owner: root:root
+    permissions: '644'
+
+  - path: /etc/telegraf/telegraf.d/inputs.conf
+    content: |
+      [[inputs.net]]
+        interfaces = ["eth*"]
+        ignore_protocol_stats = true
+
+      [[inputs.http]]
+        name_override = "jitsi_stats"
+        urls = [
+          "http://localhost:8080/colibri/stats"
+        ]
+
+        data_format = "json"
+
+    owner: root:root
+    permissions: '644'
+
+  - path: /etc/telegraf/telegraf.d/outputs.conf
+    content: |
+      [[outputs.influxdb]]
+        urls = ["http://${influx_ip_address}:8086"]
+        database = "telegraf"
+
+    owner: root:root
+    permissions: '644'

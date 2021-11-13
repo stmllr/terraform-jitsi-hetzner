@@ -1,0 +1,211 @@
+#cloud-config
+apt:
+  security:
+    - arches: [amd64]
+      uri: http://security.debian.org/debian-security
+  sources_list: |
+    deb $SECURITY $RELEASE/updates main contrib
+  sources:
+    influx:
+      source: "deb https://repos.influxdata.com/debian $RELEASE stable"
+      keyid: 684A14CF2582E0C5
+    grafana:
+      source: "deb https://packages.grafana.com/oss/deb stable main"
+      keyid: 8C8C34C524098CB6
+  debconf_selections:
+    set1: |
+      unattended-upgrades unattended-upgrades/enable_auto_updates boolean true
+package_update: true
+package_upgrade: true
+packages:
+ - unattended-upgrades
+ - vim
+ - htop
+ - screen
+ - nginx
+ - certbot
+ - influxdb
+ - grafana
+
+fqdn: ${fqdn}
+
+ssh_keys:
+  rsa_private: |
+${ssh_host_rsa_key}
+  rsa_public: ${ssh_host_rsa_key_pub}
+  dsa_private: |
+${ssh_host_dsa_key}
+  dsa_public: ${ssh_host_dsa_key_pub}
+  ecdsa_private: |
+${ssh_host_ecdsa_key}
+  ecdsa_public: ${ssh_host_ecdsa_key_pub}
+  ed25519_private: |
+${ssh_host_ed25519_key}
+  ed25519_public: ${ssh_host_ed25519_key_pub}
+
+ssh_pwauth: false
+disable_root: true
+
+users:
+  - uid: "1000"
+    name: admin
+    groups: [sudo, grafana, nginx, systemd-journal]
+    ssh-authorized-keys:
+      - ${ssh_public_key}
+    shell: /bin/bash
+
+chpasswd:
+  list: |
+    admin:default
+
+runcmd:
+    - [ systemctl, restart, networking.service ]
+    - [ rm, /etc/nginx/sites-enabled/default ]
+    - [ ln, -s, /etc/nginx/sites-available/certbot_${fqdn}.conf, /etc/nginx/sites-enabled/ ]
+    - [ systemctl, restart, nginx.service ]
+    - [ certbot, certonly, --webroot, --webroot-path, /var/www/html/, -n, --agree-tos, -m, ${letsencrypt_mail}, --domains, ${fqdn} ]
+    - [ ln, -s, /etc/nginx/sites-available/${fqdn}.conf, /etc/nginx/sites-enabled/ ]
+    - [ systemctl, restart, nginx.service ]
+    - [ mv, /etc/influxdb/influxdb.conf, /etc/influxdb/influxdb.conf.orig ]
+    - [ mv, /etc/influxdb/influxdb-custom.conf, /etc/influxdb/influxdb.conf ]
+    - [ systemctl, restart, influxd.service ]
+    - 'cat /var/tmp/grafana.ini >> /etc/grafana/grafana.ini'
+    - [ chown, -R, "grafana:grafana", /var/lib/grafana/ ]
+    - [ chmod, 750, /var/lib/grafana/dashboards ]
+    - [ systemctl, enable, grafana-server.service ]
+    - [ systemctl, restart, grafana-server.service ]
+
+write_files:
+  - path: /etc/network/interfaces.d/60-my-floating-ip.cfg
+    content: |
+      # Managed by cloud-init - please do not touch!
+      auto eth0:1
+        iface eth0:1 inet static
+        address ${public_ip_address}
+        netmask 32
+
+    owner: root:root
+    permissions: '644'
+
+  - path: /etc/ssh/sshd_config
+    encoding: gz+b64
+    content: |
+      ${sshd_config}
+
+    owner: root:root
+    permissions: '640'
+
+  - path: /etc/nginx/conf.d/00-log.conf
+    encoding: gz+b64
+    content: |
+      ${nginx_log_conf}
+
+    owner: root:root
+    permissions: '644'
+
+  - path: /etc/nginx/sites-available/certbot_${fqdn}.conf
+    content: |
+      server {
+        listen 80;
+        listen [::]:80;
+        server_name ${fqdn};
+
+        location ^~ /.well-known/acme-challenge/ {
+           default_type "text/plain";
+           root /var/www/html;
+        }
+
+        location = /.well-known/acme-challenge/ {
+           return 404;
+        }
+
+        location / {
+           return 301 https://$host$request_uri;
+        }
+      }
+
+    owner: root:root
+    permissions: '644'
+
+  - path: /etc/nginx/sites-available/${fqdn}.conf
+    content: |
+      server {
+        listen 443 ssl;
+        listen [::]:443 ssl;
+        server_name ${fqdn};
+
+        add_header Strict-Transport-Security "max-age=63072000" always;
+        add_header X-Frame-Options SAMEORIGIN;
+
+        ssl_certificate /etc/letsencrypt/live/${fqdn}/fullchain.pem;
+        ssl_certificate_key /etc/letsencrypt/live/${fqdn}/privkey.pem;
+
+        location / {
+          proxy_pass http://localhost:3000/;
+          proxy_redirect off;
+          proxy_set_header Host $http_host;
+          proxy_set_header X-Real-IP $remote_addr;
+        }
+      }
+
+    owner: root:root
+    permissions: '644'
+
+  - path: /etc/influxdb/influxdb-custom.conf
+    content: |
+      reporting-disabled = true
+      bind-address = "${private_ip_address}:8088"
+      [meta]
+        dir = "/var/lib/influxdb/meta"
+      [data]
+        query-log-enabled = false
+        dir = "/var/lib/influxdb/data"
+        wal-dir = "/var/lib/influxdb/wal"
+        series-id-set-cache-size = 100
+      [http]
+        log-enabled = false
+
+    owner: root:root
+    permissions: '644'
+
+  - path: /var/tmp/grafana.ini
+    content: |
+      [auth.anonymous]
+      # enable anonymous access
+      enabled = true
+      hide_version = true
+
+      [security]
+      admin_password = ${grafana_admin_passwd}
+      cookie_secure = true
+      strict_transport_security = true
+      content_security_policy = true
+
+      [users]
+      allow_sign_up = false
+
+    owner: root:root
+    permissions: '640'
+
+  - path: /etc/grafana/provisioning/datasources/influxdb.yaml
+    encoding: gz+b64
+    content: |
+      ${influxdb_yaml}
+
+    owner: root:root
+    permissions: '640'
+
+  - path: /etc/grafana/provisioning/dashboards/file.yaml
+    encoding: gz+b64
+    content: |
+      ${grafana_provisioning}
+
+    owner: root:root
+    permissions: '640'
+
+  - path: /var/lib/grafana/dashboards/jitsi.json
+    encoding: gz+b64
+    content: |
+      ${grafana_jitsi_dashboard}
+    owner: root:root
+    permissions: '640'

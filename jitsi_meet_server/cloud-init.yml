@@ -66,6 +66,7 @@ runcmd:
 
     - [ sed, -i.bak, -e, "s#^.level=INFO#.level=WARNING#g", /etc/jitsi/videobridge/logging.properties ]
     - [ sed, -i.bak, -e, 's#JVB_OPTS="--apis=,"#JVB_OPTS="--apis=rest,"#' , /etc/jitsi/videobridge/config ]
+    - [ sed, -i.bak, -e, 's#%m#%m{nolookups}#', /etc/jitsi/videobridge/log4j2.xml ]
     - 'cat /var/tmp/jitsi-meet-config.txt >> /etc/jitsi/meet/${fqdn}-config.js'
     - 'cat /var/tmp/jitsi-interface-config.txt >> /usr/share/jitsi-meet/interface_config.js'
 
